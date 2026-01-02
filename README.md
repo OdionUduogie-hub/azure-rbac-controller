@@ -338,10 +338,7 @@ If Terraform cannot access the state file:
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+This project welcomes contributions and suggestions! Please feel free to raise an issue or create a pull request.
 
 ---
 
@@ -353,4 +350,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Disclaimer
 
-This project is provided as a helpful starting point for managing Azure RBAC with Terraform. While we've done our best to make it reliable, please review Terraform plans before applying changes and test in a non-production environment first. As with any infrastructure automation, following best practices for backups and change management is recommended.
+This project is provided as a helpful starting point for managing Azure RBAC with Terraform.
+While we've done our best to make it reliable, please review the code and Terraform plans before applying changes and always test in a non-production environment first.
+This project is provided as-is and without any warranty.
