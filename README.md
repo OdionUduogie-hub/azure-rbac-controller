@@ -128,14 +128,6 @@ $mainCredential = @{
 }
 New-AzADAppFederatedCredential -ApplicationObjectId $app.Id @mainCredential
 
-# Credential for scheduled workflows (drift detection)
-$scheduleCredential = @{
-  Name = "github-schedule"
-  Issuer = "https://token.actions.githubusercontent.com"
-  Subject = "repo:<your-org>/<your-repo>:ref:refs/heads/main"
-  Audience = @("api://AzureADTokenExchange")
-}
-New-AzADAppFederatedCredential -ApplicationObjectId $app.Id @scheduleCredential
 ```
 
 > **Note:** The scheduled workflow credential uses the same subject as the main branch credential. If you need a separate credential, you can use `repo:<your-org>/<your-repo>:environment:<environment-name>` instead.
