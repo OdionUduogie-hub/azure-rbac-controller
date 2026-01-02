@@ -130,7 +130,6 @@ New-AzADAppFederatedCredential -ApplicationObjectId $app.Id @mainCredential
 
 ```
 
-> **Note:** The scheduled workflow credential uses the same subject as the main branch credential. If you need a separate credential, you can use `repo:<your-org>/<your-repo>:environment:<environment-name>` instead.
 
 if you have configured the SP correctly, you should see the federated credentials listed:
 
