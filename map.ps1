@@ -80,8 +80,22 @@ function Get-RoleAssignmentsForSubscription {
     Write-Host "🔍 Scanning role assignments for subscription: $SubscriptionId" -ForegroundColor Cyan
     
     Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
-    $roleAssignments = Get-AzRoleAssignment -Scope "/subscriptions/$SubscriptionId" | 
+    $allRoleAssignments = Get-AzRoleAssignment -Scope "/subscriptions/$SubscriptionId" | 
         Where-Object { $_.Scope.Contains($SubscriptionId) -and $_.Scope -ne "/" }
+
+    # Exclude time based role assignments
+    $scheduledInstances = Get-AzRoleAssignmentScheduleInstance -Scope "/subscriptions/$SubscriptionId" -ErrorAction SilentlyContinue | 
+        Where-Object { $_.Scope.Contains($SubscriptionId) -and $_.Scope -ne "/" }
+    
+    if ($?) {
+        $roleAssignments = $allRoleAssignments | Where-Object {
+            $_.RoleAssignmentId -notin $scheduledInstances.originRoleAssignmentId
+        }
+    }
+    else {
+        $roleAssignments = $allRoleAssignments
+    }
+
     
     Write-Host "   Found $($roleAssignments.Count) role assignments" -ForegroundColor Gray
     return $roleAssignments

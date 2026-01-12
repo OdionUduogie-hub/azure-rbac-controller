@@ -87,20 +87,31 @@ foreach ($folder in $SubscriptionFolders) {
 
         Write-Host "   Subscription ID: $subscriptionId" -ForegroundColor Gray
 
-        # Set Azure context
-        az account set -s $subscriptionId 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "   ❌ Failed to set subscription context. Run 'az login' first." -ForegroundColor Red
+        # Set Azure context using Az PowerShell module
+        try {
+            Set-AzContext -SubscriptionId $subscriptionId | Out-Null
+        }
+        catch {
+            Write-Host "   ❌ Failed to set subscription context. Run 'Connect-AzAccount' first." -ForegroundColor Red
             continue
         }
 
-        # Get Azure role assignments
-        $roleAssignments = az role assignment list --all 2>$null | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "   ❌ Failed to list role assignments" -ForegroundColor Red
-            continue
+        # Get Azure role assignments using Az PowerShell module
+        $allRoleAssignments = Get-AzRoleAssignment -Scope "/subscriptions/$subscriptionId" | 
+            Where-Object { $_.Scope.Contains($subscriptionId) -and $_.Scope -ne "/" }
+
+        # Exclude time-based role assignments (PIM)
+        $scheduledInstances = Get-AzRoleAssignmentScheduleInstance -Scope "/subscriptions/$subscriptionId" -ErrorAction SilentlyContinue | 
+            Where-Object { $_.Scope.Contains($subscriptionId) -and $_.Scope -ne "/" }
+        
+        if ($?) {
+            $roleAssignments = $allRoleAssignments | Where-Object {
+                $_.RoleAssignmentId -notin $scheduledInstances.originRoleAssignmentId
+            }
         }
-        $roleAssignments = $roleAssignments | Where-Object { $_.scope.ToLower().Contains($subscriptionId.ToLower()) }
+        else {
+            $roleAssignments = $allRoleAssignments
+        }
 
         # Get Terraform state
         $state = terraform state pull 2>$null | ConvertFrom-Json
@@ -113,7 +124,7 @@ foreach ($folder in $SubscriptionFolders) {
             ForEach-Object { $_.ToLower() }
 
         # Find drift
-        $driftedRoles = $roleAssignments | Where-Object { $_.id.ToLower() -notin $stateIds }
+        $driftedRoles = $roleAssignments | Where-Object { $_.RoleAssignmentId.ToLower() -notin $stateIds }
 
         if ($driftedRoles.Count -gt 0) {
             Write-Host "   ⚠️ Drift detected: $($driftedRoles.Count) role(s) not in Terraform state" -ForegroundColor Yellow
@@ -121,11 +132,11 @@ foreach ($folder in $SubscriptionFolders) {
             foreach ($role in $driftedRoles) {
                 $allDrift += [PSCustomObject]@{
                     Subscription       = $folder
-                    PrincipalName      = if ($role.principalName) { $role.principalName } else { "N/A" }
-                    PrincipalId        = $role.principalId
-                    RoleDefinitionName = $role.roleDefinitionName
-                    Scope              = $role.scope
-                    AssignmentId       = $role.id
+                    PrincipalName      = if ($role.DisplayName) { $role.DisplayName } else { "N/A" }
+                    PrincipalId        = $role.ObjectId
+                    RoleDefinitionName = $role.RoleDefinitionName
+                    Scope              = $role.Scope
+                    AssignmentId       = $role.RoleAssignmentId
                 }
             }
 
@@ -136,12 +147,12 @@ foreach ($folder in $SubscriptionFolders) {
                 $mdTable += "|----------------|--------------|-----------|-------------------|---------------|-------|"
                 
                 foreach ($role in $driftedRoles) {
-                    $principalName = if ($role.principalName) { $role.principalName } else { "N/A" }
-                    $principalId = $role.principalId
-                    $roleName = $role.roleDefinitionName
-                    $roleDefId = ($role.roleDefinitionId -split '/')[-1]
-                    $assignmentId = ($role.id -split '/')[-1]
-                    $scope = $role.scope
+                    $principalName = if ($role.DisplayName) { $role.DisplayName } else { "N/A" }
+                    $principalId = $role.ObjectId
+                    $roleName = $role.RoleDefinitionName
+                    $roleDefId = ($role.RoleDefinitionId -split '/')[-1]
+                    $assignmentId = ($role.RoleAssignmentId -split '/')[-1]
+                    $scope = $role.Scope
                     
                     $mdTable += "| $principalName | ``$principalId`` | $roleName | ``$roleDefId`` | ``$assignmentId`` | ``$scope`` |"
                 }
