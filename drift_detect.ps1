@@ -88,10 +88,8 @@ foreach ($folder in $SubscriptionFolders) {
         Write-Host "   Subscription ID: $subscriptionId" -ForegroundColor Gray
 
         # Set Azure context using Az PowerShell module
-        try {
-            Set-AzContext -SubscriptionId $subscriptionId | Out-Null
-        }
-        catch {
+        $context = Set-AzContext -SubscriptionId $subscriptionId -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        if (-not $context) {
             Write-Host "   ❌ Failed to set subscription context. Run 'Connect-AzAccount' first." -ForegroundColor Red
             continue
         }
@@ -100,13 +98,13 @@ foreach ($folder in $SubscriptionFolders) {
         $allRoleAssignments = Get-AzRoleAssignment -Scope "/subscriptions/$subscriptionId" | 
             Where-Object { $_.Scope.Contains($subscriptionId) -and $_.Scope -ne "/" }
 
-        # Exclude time-based role assignments (PIM)
+        # Exclude time-based role assignments (PIM) - only those with an EndDateTime
         $scheduledInstances = Get-AzRoleAssignmentScheduleInstance -Scope "/subscriptions/$subscriptionId" -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Scope.Contains($subscriptionId) -and $_.Scope -ne "/" }
+            Where-Object { $_.Scope.Contains($subscriptionId) -and $_.Scope -ne "/" -and $_.EndDateTime }
         
         if ($?) {
             $roleAssignments = $allRoleAssignments | Where-Object {
-                $_.RoleAssignmentId -notin $scheduledInstances.originRoleAssignmentId
+                $_.RoleAssignmentId -notin $scheduledInstances.OriginRoleAssignmentId
             }
         }
         else {
@@ -120,16 +118,64 @@ foreach ($folder in $SubscriptionFolders) {
             continue
         }
 
-        $stateIds = @(($state.resources | Where-Object { $_.type -eq "azurerm_role_assignment" }).instances.attributes.id) | 
-            ForEach-Object { $_.ToLower() }
+        # Build a hashtable of state role assignments with their conditions
+        $stateRoleAssignments = @{}
+        $stateResources = $state.resources | Where-Object { $_.type -eq "azurerm_role_assignment" }
+        foreach ($resource in $stateResources) {
+            foreach ($instance in $resource.instances) {
+                $id = $instance.attributes.id.ToLower()
+                $stateRoleAssignments[$id] = @{
+                    condition = $instance.attributes.condition
+                    conditionVersion = $instance.attributes.condition_version
+                }
+            }
+        }
 
-        # Find drift
-        $driftedRoles = $roleAssignments | Where-Object { $_.RoleAssignmentId.ToLower() -notin $stateIds }
+        $stateIds = $stateRoleAssignments.Keys
+
+        # Find drift - role assignments not in state OR with mismatched conditions
+        $driftedRoles = @()
+        foreach ($role in $roleAssignments) {
+            $roleId = $role.RoleAssignmentId.ToLower()
+            
+            if ($roleId -notin $stateIds) {
+                # Role assignment doesn't exist in state at all
+                $driftedRoles += [PSCustomObject]@{
+                    Role = $role
+                    DriftType = "Missing"
+                }
+            }
+            else {
+                # Role exists in state - check for condition mismatch
+                $stateEntry = $stateRoleAssignments[$roleId]
+                $azureCondition = if ($role.Condition) { $role.Condition.Trim() } else { $null }
+                $stateCondition = if ($stateEntry.condition) { $stateEntry.condition.Trim() } else { $null }
+                
+                # Detect mismatch if conditions differ
+                $conditionsDiffer = $azureCondition -ne $stateCondition
+                
+                # Only compare version if at least one side has a condition
+                $versionsDiffer = $false
+                if ($azureCondition -or $stateCondition) {
+                    $azureVersion = if ($role.ConditionVersion) { $role.ConditionVersion } else { $null }
+                    $stateVersion = if ($stateEntry.conditionVersion) { $stateEntry.conditionVersion } else { $null }
+                    $versionsDiffer = $azureVersion -ne $stateVersion
+                }
+                
+                if ($conditionsDiffer -or $versionsDiffer) {
+                    $driftedRoles += [PSCustomObject]@{
+                        Role = $role
+                        DriftType = "ConditionMismatch"
+                    }
+                }
+            }
+        }
 
         if ($driftedRoles.Count -gt 0) {
-            Write-Host "   ⚠️ Drift detected: $($driftedRoles.Count) role(s) not in Terraform state" -ForegroundColor Yellow
+            Write-Host "   ⚠️ Drift detected: $($driftedRoles.Count) role(s) with drift" -ForegroundColor Yellow
             
-            foreach ($role in $driftedRoles) {
+            foreach ($item in $driftedRoles) {
+                $role = $item.Role
                 $allDrift += [PSCustomObject]@{
                     Subscription       = $folder
                     PrincipalName      = if ($role.DisplayName) { $role.DisplayName } else { "N/A" }
@@ -137,27 +183,105 @@ foreach ($folder in $SubscriptionFolders) {
                     RoleDefinitionName = $role.RoleDefinitionName
                     Scope              = $role.Scope
                     AssignmentId       = $role.RoleAssignmentId
+                    Condition          = if ($role.Condition) { $role.Condition } else { "" }
+                    DriftType          = $item.DriftType
                 }
             }
 
             # Generate markdown report if requested
             if ($OutputMarkdown) {
-                $mdTable = @()
-                $mdTable += "| Principal Name | Principal ID | Role Name | Role Definition ID | Assignment ID | Scope |"
-                $mdTable += "|----------------|--------------|-----------|-------------------|---------------|-------|"
+                $mdContent = @()
+                $mdContent += "## Drift Summary"
+                $mdContent += ""
+                $mdContent += "| Principal Name | Principal ID | Role Name | Scope | Drift Type | Condition |"
+                $mdContent += "|----------------|--------------|-----------|-------|------------|-----------|"
                 
-                foreach ($role in $driftedRoles) {
+                foreach ($item in $driftedRoles) {
+                    $role = $item.Role
                     $principalName = if ($role.DisplayName) { $role.DisplayName } else { "N/A" }
                     $principalId = $role.ObjectId
                     $roleName = $role.RoleDefinitionName
-                    $roleDefId = ($role.RoleDefinitionId -split '/')[-1]
-                    $assignmentId = ($role.RoleAssignmentId -split '/')[-1]
                     $scope = $role.Scope
+                    $driftType = $item.DriftType
+                    $condition = if ($role.Condition) { $role.Condition -replace '\|', '\|' -replace '\n', ' ' } else { "-" }
                     
-                    $mdTable += "| $principalName | ``$principalId`` | $roleName | ``$roleDefId`` | ``$assignmentId`` | ``$scope`` |"
+                    $mdContent += "| $principalName | ``$principalId`` | $roleName | ``$scope`` | $driftType | ``$condition`` |"
                 }
                 
-                $mdTable -join "`n" | Set-Content -Path (Join-Path $folderPath "drift_report.md")
+                # Add remediation instructions for missing role assignments only
+                $missingRoles = $driftedRoles | Where-Object { $_.DriftType -eq "Missing" }
+                if ($missingRoles.Count -gt 0) {
+                    $mdContent += ""
+                    $mdContent += "---"
+                    $mdContent += ""
+                    $mdContent += "## Remediation Instructions"
+                    $mdContent += ""
+                    $mdContent += "To import the missing role assignments into Terraform, follow these steps:"
+                    $mdContent += ""
+                    
+                    # Get current max index from tfvars
+                    $tfvarsPath = Join-Path $folderPath "terraform.tfvars.json"
+                    $currentTfvars = Get-Content $tfvarsPath -Raw | ConvertFrom-Json
+                    $maxIndex = ($currentTfvars.permissions.PSObject.Properties.Name | ForEach-Object { [int]$_ } | Measure-Object -Maximum).Maximum
+                    if ($null -eq $maxIndex) { $maxIndex = -1 }
+                    
+                    $mdContent += "### 1. Add to ``import.tf``"
+                    $mdContent += ""
+                    $mdContent += "``````hcl"
+                    
+                    $importIndex = $maxIndex + 1
+                    foreach ($item in $missingRoles) {
+                        $role = $item.Role
+                        $mdContent += "import {"
+                        $mdContent += "  to = module.rbac.azurerm_role_assignment.basic[`"$importIndex`"]"
+                        $mdContent += "  id = `"$($role.RoleAssignmentId)`""
+                        $mdContent += "}"
+                        $mdContent += ""
+                        $importIndex++
+                    }
+                    $mdContent += "``````"
+                    $mdContent += ""
+                    
+                    $mdContent += "### 2. Add to ``terraform.tfvars.json``"
+                    $mdContent += ""
+                    $mdContent += "Add the following entries to the ``permissions`` object:"
+                    $mdContent += ""
+                    $mdContent += "``````json"
+                    
+                    $varIndex = $maxIndex + 1
+                    foreach ($item in $missingRoles) {
+                        $role = $item.Role
+                        $entry = [ordered]@{
+                            roleDefinitionName = $role.RoleDefinitionName
+                            scope = $role.Scope
+                            principalId = $role.ObjectId
+                        }
+                        if ($role.Condition) {
+                            $entry.condition = $role.Condition
+                            $entry.conditionVersion = $role.ConditionVersion
+                        }
+                        $jsonEntry = $entry | ConvertTo-Json -Depth 10
+                        # Indent the JSON for readability
+                        $indentedJson = $jsonEntry -split "`n" | ForEach-Object { "  $_" }
+                        $mdContent += "`"$varIndex`": {"
+                        $mdContent += ($indentedJson | Select-Object -Skip 1 | Select-Object -SkipLast 1)
+                        $mdContent += "  },"
+                        $varIndex++
+                    }
+                    $mdContent += "``````"
+                    $mdContent += ""
+                    $mdContent += "### 3. Commit and Create PR"
+                    $mdContent += ""
+                    $mdContent += "``````bash"
+                    $mdContent += "git add ."
+                    $mdContent += "git commit -m `"Import missing role assignments`""
+                    $mdContent += "git push"
+                    $mdContent += "``````"
+                    $mdContent += ""
+                    $mdContent += "Then create a Pull Request to trigger the Terraform plan workflow."
+                }
+                
+                $mdContent -join "`n" | Set-Content -Path (Join-Path $folderPath "drift_report.md")
             }
         }
         else {
@@ -175,12 +299,12 @@ Write-Host "══════════════════════�
 Write-Host ""
 
 if ($allDrift.Count -gt 0) {
-    Write-Host "📊 Drift Summary: $($allDrift.Count) unmanaged role assignment(s) found" -ForegroundColor Yellow
+    Write-Host "📊 Drift Summary: $($allDrift.Count) role assignment(s) with drift found" -ForegroundColor Yellow
     Write-Host ""
     
     $allDrift | Group-Object -Property Subscription | ForEach-Object {
         Write-Host "📁 $($_.Name): $($_.Count) role(s)" -ForegroundColor Yellow
-        $_.Group | Format-Table -Property PrincipalName, RoleDefinitionName, Scope -AutoSize
+        $_.Group | Format-Table -Property PrincipalName, RoleDefinitionName, Scope, DriftType -AutoSize
     }
     
     # Export to CSV (local runs)

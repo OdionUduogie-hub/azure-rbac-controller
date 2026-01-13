@@ -83,13 +83,13 @@ function Get-RoleAssignmentsForSubscription {
     $allRoleAssignments = Get-AzRoleAssignment -Scope "/subscriptions/$SubscriptionId" | 
         Where-Object { $_.Scope.Contains($SubscriptionId) -and $_.Scope -ne "/" }
 
-    # Exclude time based role assignments
+    # Exclude time-based role assignments (PIM) - only those with an EndDateTime
     $scheduledInstances = Get-AzRoleAssignmentScheduleInstance -Scope "/subscriptions/$SubscriptionId" -ErrorAction SilentlyContinue | 
-        Where-Object { $_.Scope.Contains($SubscriptionId) -and $_.Scope -ne "/" }
+        Where-Object { $_.Scope.Contains($SubscriptionId) -and $_.Scope -ne "/" -and $_.EndDateTime }
     
     if ($?) {
         $roleAssignments = $allRoleAssignments | Where-Object {
-            $_.RoleAssignmentId -notin $scheduledInstances.originRoleAssignmentId
+            $_.RoleAssignmentId -notin $scheduledInstances.OriginRoleAssignmentId
         }
     }
     else {
@@ -136,6 +136,8 @@ variable "permissions" {
     roleDefinitionId   = optional(string)
     principalId        = string
     scope              = string
+    condition          = optional(string)
+    conditionVersion   = optional(string)
   }))
   validation {
     condition = alltrue([
@@ -156,6 +158,8 @@ module "rbac" {
       role_definition_name = value.roleDefinitionId == null ? value.roleDefinitionName : null
       role_definition_id   = value.roleDefinitionId != null ? value.roleDefinitionId : null
       scope                = value.scope
+      condition            = value.condition
+      condition_version    = value.conditionVersion
     }
   }
 }
@@ -181,11 +185,16 @@ terraform {
     $jsonRolesHash = [ordered]@{}
     $i = 0
     foreach ($roleAssignment in $RoleAssignments) {
-        $jsonRolesHash[[string]$i] = [ordered]@{
+        $entry = [ordered]@{
             roleDefinitionName = $roleAssignment.RoleDefinitionName
             scope              = $roleAssignment.Scope
             principalId        = $roleAssignment.ObjectId
         }
+        if ($roleAssignment.Condition) {
+            $entry.condition = $roleAssignment.Condition
+            $entry.conditionVersion = $roleAssignment.ConditionVersion
+        }
+        $jsonRolesHash[[string]$i] = $entry
         $i++
     }
     $json = @{ permissions = $jsonRolesHash }
