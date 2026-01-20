@@ -78,7 +78,7 @@ $storageAccount = New-AzStorageAccount `
   -ResourceGroupName "rg-terraform-state" `
   -Name "tfstate<unique-suffix>" `
   -Location "eastus" `
-  -SkuName "Standard_LRS" `
+  -SkuName Standard_LRS `
   -AllowBlobPublicAccess $false `
   -MinimumTlsVersion "TLS1_2"
 
